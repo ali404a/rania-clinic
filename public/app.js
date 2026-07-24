@@ -1000,9 +1000,10 @@ function drawMonth(box) {
 
 window.openAppointment = async function (presetPid, editId, presetDate, presetTime) {
   const ap = editId ? calCache.find(a => a.id === editId) : null;
-  const pid = ap ? ap.patientId : presetPid;
+  let pid = ap ? ap.patientId : presetPid;
   let patients = [];
   try { patients = (await apiGet('/patients?limit=500')).patients; } catch (e) { toast(e.message, 'err'); return; }
+  if (!pid && patients.length) pid = patients[0].id;
   const selP = patients.find(p => p.id == pid);
   const selName = selP ? `${selP.fullName} — #${selP.fileNo}` : '';
   const times = []; for (let h = 15; h < 21; h++) { times.push(`${h}:00`); times.push(`${h}:30`); }
@@ -1028,9 +1029,14 @@ window.openAppointment = async function (presetPid, editId, presetDate, presetTi
   initPatientPicker('a_pid', patients);
 
   $('#saveAptBtn').onclick = async () => {
+    const patientId = Number($('#a_pid').value);
+    if (!patientId || patientId <= 0) {
+      toast('يرجى اختيار مريض من قائمة البحث', 'err');
+      return;
+    }
     const btn = $('#saveAptBtn'); btn.disabled = true;
     const payload = {
-      patientId: Number($('#a_pid').value), appointmentDate: $('#a_date').value,
+      patientId, appointmentDate: $('#a_date').value,
       appointmentTime: $('#a_time').value, durationMin: Number($('#a_dur').value),
       treatmentType: $('#a_type').value, status: $('#a_status').value,
     };
@@ -1132,11 +1138,13 @@ window.openLabForm = async function (id) {
     patients = (await apiGet('/patients?limit=500')).patients;
     if (id) l = (await apiGet('/labs')).labs.find(x => x.id === id) || {};
   } catch (e) { toast(e.message, 'err'); return; }
-  const selP = patients.find(p => p.id == l.patientId);
+  let pid = l.patientId;
+  if (!pid && patients.length) pid = patients[0].id;
+  const selP = patients.find(p => p.id == pid);
   const selName = selP ? `${selP.fullName} — #${selP.fileNo}` : '';
   const body = `<div class="form-grid">
     <div class="field" style="grid-column:1/-1"><label>المريض <span class="req">*</span></label>
-      ${patientPickerHTML('l_pid', l.patientId, selName)}</div>
+      ${patientPickerHTML('l_pid', pid, selName)}</div>
     <div class="field"><label>تفاصيل العمل <span class="req">*</span></label><input id="l_work" value="${esc(l.workDetails || '')}" placeholder="تاج، جسر، جهاز تقويم..."></div>
     <div class="field"><label>اسم المختبر</label><input id="l_lab" value="${esc(l.labName || '')}" placeholder="مختبر..."></div>
     <div class="field"><label>المصاريف</label><input id="l_cost" type="number" min="0" value="${l.cost ?? ''}" placeholder="0"></div>
@@ -1151,9 +1159,14 @@ window.openLabForm = async function (id) {
   initPatientPicker('l_pid', patients);
 
   $('#saveLabBtn').onclick = async () => {
+    const patientId = Number($('#l_pid').value);
+    if (!patientId || patientId <= 0) {
+      toast('يرجى اختيار مريض من قائمة البحث', 'err');
+      return;
+    }
     const btn = $('#saveLabBtn'); btn.disabled = true;
     const payload = {
-      patientId: Number($('#l_pid').value), workDetails: $('#l_work').value.trim(),
+      patientId, workDetails: $('#l_work').value.trim(),
       labName: $('#l_lab').value.trim(), cost: Number($('#l_cost').value || 0),
       status: $('#l_status').value, dueDate: $('#l_due').value || undefined,
     };
