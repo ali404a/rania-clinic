@@ -98,6 +98,104 @@ function toast(msg, type = 'ok') {
   setTimeout(() => { t.style.transition = '.3s'; t.style.opacity = '0'; t.style.transform = 'translateX(-40px)'; setTimeout(() => t.remove(), 300); }, 3400);
 }
 
+/* ---------- حقل بحث المرضى القابل لإعادة الاستخدام ---------- */
+/**
+ * Creates a searchable patient picker widget.
+ * @param {string} inputId - ID for the hidden input that stores selected patient ID
+ * @param {number|null} preselectedId - Pre-selected patient ID (or null)
+ * @param {string} preselectedName - Pre-selected patient display name
+ * @param {Function} onSelect - Callback called with (patientId, patientObj) when selected
+ * @returns {string} HTML string to embed in the form
+ */
+function patientPickerHTML(inputId, preselectedId, preselectedName) {
+  return `<div class="patient-picker" style="position:relative" id="${inputId}_wrap">
+    <input type="hidden" id="${inputId}" value="${preselectedId || ''}">
+    <div style="position:relative">
+      <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" style="position:absolute;inset-inline-start:14px;top:50%;transform:translateY(-50%);width:17px;height:17px;color:var(--txt-3);pointer-events:none;z-index:1"><circle cx="11" cy="11" r="8"/><path d="M21 21l-4-4"/></svg>
+      <input id="${inputId}_search" autocomplete="off" placeholder="ابحث بالاسم أو رقم الملف…"
+        value="${esc(preselectedName || '')}"
+        style="padding-inline-start:42px;${preselectedId ? 'color:var(--txt);font-weight:600' : ''}">
+    </div>
+    <div class="pp-results" id="${inputId}_results" style="display:none;position:absolute;top:100%;inset-inline:0;z-index:60;
+      background:var(--bg-2);border:1px solid var(--glass-border);border-radius:14px;box-shadow:var(--shadow);
+      max-height:240px;overflow-y:auto;margin-top:4px"></div>
+  </div>`;
+}
+
+function initPatientPicker(inputId, patients, onSelect) {
+  const wrap = $(`#${inputId}_wrap`);
+  if (!wrap) return;
+  const searchInput = $(`#${inputId}_search`);
+  const hiddenInput = $(`#${inputId}`);
+  const resultsBox = $(`#${inputId}_results`);
+  let debounce;
+
+  function renderResults(query) {
+    const q = (query || '').trim().toLowerCase();
+    let filtered = patients;
+    if (q) {
+      filtered = patients.filter(p =>
+        p.fullName.toLowerCase().includes(q) ||
+        String(p.fileNo).includes(q) ||
+        (p.phone || '').includes(q)
+      );
+    }
+    resultsBox.innerHTML = '';
+    if (!filtered.length) {
+      resultsBox.innerHTML = `<div style="padding:16px;text-align:center;color:var(--txt-3);font-size:13px">لا توجد نتائج</div>`;
+      resultsBox.style.display = 'block';
+      return;
+    }
+    filtered.slice(0, 30).forEach(p => {
+      const r = el('div');
+      r.style.cssText = 'display:flex;align-items:center;gap:11px;padding:11px 14px;cursor:pointer;border-bottom:1px solid rgba(3,7,45,.05);transition:.12s';
+      r.innerHTML = `<span class="mini-av" style="width:32px;height:32px;font-size:12px;border-radius:9px">${esc(initials(p.fullName))}</span>
+        <div style="flex:1;min-width:0"><div style="font-weight:700;font-size:13.5px">${esc(p.fullName)}</div>
+        <div style="font-size:11.5px;color:var(--txt-3)">#${p.fileNo} ${p.phone ? '• ' + esc(p.phone) : ''}</div></div>`;
+      r.onmouseenter = () => r.style.background = 'var(--glass-hi)';
+      r.onmouseleave = () => r.style.background = '';
+      r.onmousedown = (e) => {
+        e.preventDefault(); // Prevent blur from firing first
+        hiddenInput.value = p.id;
+        searchInput.value = `${p.fullName} — #${p.fileNo}`;
+        searchInput.style.color = 'var(--txt)';
+        searchInput.style.fontWeight = '600';
+        resultsBox.style.display = 'none';
+        if (onSelect) onSelect(p.id, p);
+      };
+      resultsBox.appendChild(r);
+    });
+    if (filtered.length > 30) {
+      resultsBox.innerHTML += `<div style="padding:10px;text-align:center;color:var(--txt-3);font-size:12px">+${filtered.length - 30} نتيجة أخرى — حاول تضييق البحث</div>`;
+    }
+    resultsBox.style.display = 'block';
+  }
+
+  searchInput.onfocus = () => {
+    if (!hiddenInput.value) renderResults(searchInput.value);
+    else renderResults(''); // Show all when focused with selection
+  };
+
+  searchInput.oninput = () => {
+    clearTimeout(debounce);
+    // Clear selection when user types
+    hiddenInput.value = '';
+    searchInput.style.color = '';
+    searchInput.style.fontWeight = '';
+    debounce = setTimeout(() => renderResults(searchInput.value), 150);
+  };
+
+  searchInput.onblur = () => {
+    setTimeout(() => { resultsBox.style.display = 'none'; }, 200);
+  };
+
+  // If we have a preselected value, don't show results initially
+  if (hiddenInput.value) {
+    searchInput.style.color = 'var(--txt)';
+    searchInput.style.fontWeight = '600';
+  }
+}
+
 /* ---------- مخطط الأسنان ---------- */
 const TOOTH_STATES = {
   '':        { c: '#F2F5FC', label: 'سليم' },
@@ -614,17 +712,21 @@ async function cycleTooth(patientId, chart, n, th) {
 }
 
 async function viewChart(c) {
-  const d = await apiGet('/patients?limit=100');
+  const d = await apiGet('/patients?limit=500');
   if (!d.patients.length) { c.appendChild(emptyState('لا يوجد مرضى بعد', I.chart)); return; }
+  const firstP = d.patients[0];
+  const firstName = `${firstP.fullName} — #${firstP.fileNo}`;
   const head = el('div'); head.style.cssText = 'display:flex;gap:12px;align-items:center;margin-bottom:20px;flex-wrap:wrap';
-  head.innerHTML = `<div class="field" style="min-width:280px"><label>اختر المريض</label>
-    <select id="chartSel">${d.patients.map(p => `<option value="${p.id}">${esc(p.fullName)} — #${p.fileNo}</option>`).join('')}</select></div>`;
+  head.innerHTML = `<div class="field" style="min-width:320px"><label>اختر المريض</label>
+    ${patientPickerHTML('chartSel', firstP.id, firstName)}</div>`;
   c.appendChild(head);
   const box = el('div', 'glass'); box.style.padding = '26px'; c.appendChild(box);
 
-  async function draw() {
+  async function draw(pid) {
+    const selectedId = pid || $('#chartSel').value;
+    if (!selectedId) return;
     box.innerHTML = '<div class="empty"><div class="spinner"></div></div>';
-    const full = await apiGet('/patients/' + $('#chartSel').value);
+    const full = await apiGet('/patients/' + selectedId);
     box.innerHTML = '';
     const t = el('div');
     t.innerHTML = `<div style="display:flex;align-items:center;gap:12px;margin-bottom:18px">
@@ -634,8 +736,8 @@ async function viewChart(c) {
     box.appendChild(t);
     box.appendChild(buildToothChart(full.patient.id, full.chart, ME.role === 'doctor'));
   }
-  await draw();
-  $('#chartSel').onchange = draw;
+  initPatientPicker('chartSel', d.patients, (selectedId) => draw(selectedId));
+  await draw(firstP.id);
 }
 
 /* =========== النماذج =========== */
@@ -900,12 +1002,14 @@ window.openAppointment = async function (presetPid, editId, presetDate, presetTi
   const ap = editId ? calCache.find(a => a.id === editId) : null;
   const pid = ap ? ap.patientId : presetPid;
   let patients = [];
-  try { patients = (await apiGet('/patients?limit=100')).patients; } catch (e) { toast(e.message, 'err'); return; }
+  try { patients = (await apiGet('/patients?limit=500')).patients; } catch (e) { toast(e.message, 'err'); return; }
+  const selP = patients.find(p => p.id == pid);
+  const selName = selP ? `${selP.fullName} — #${selP.fileNo}` : '';
   const times = []; for (let h = 15; h < 21; h++) { times.push(`${h}:00`); times.push(`${h}:30`); }
   const types = ['كشف','تنظيف','حشوة','خلع','علاج عصب','تتويج','متابعة تقويم','مراجعة بعد العلاج','تبييض'];
   const body = `<div class="form-grid">
     <div class="field" style="grid-column:1/-1"><label>المريض <span class="req">*</span></label>
-      <select id="a_pid">${patients.map(p => `<option value="${p.id}" ${p.id == pid ? 'selected' : ''}>${esc(p.fullName)} — #${p.fileNo}</option>`).join('') || '<option value="">لا يوجد مرضى</option>'}</select></div>
+      ${patientPickerHTML('a_pid', pid, selName)}</div>
     <div class="field"><label>التاريخ</label><input id="a_date" type="date" value="${ap ? ap.appointmentDate : (presetDate || todayStr())}"></div>
     <div class="field"><label>الوقت</label><select id="a_time">${times.map(t => `<option value="${t}" ${(ap ? ap.appointmentTime : presetTime) === t ? 'selected' : ''}>${to12(t)}</option>`).join('')}</select></div>
     <div class="field"><label>نوع العلاج</label><select id="a_type">${types.map(t => `<option ${ap && ap.treatmentType === t ? 'selected' : ''}>${t}</option>`).join('')}</select></div>
@@ -921,6 +1025,7 @@ window.openAppointment = async function (presetPid, editId, presetDate, presetTi
   if (ap) actions += `<button class="btn btn-danger" id="delAptBtn">${I.trash} إلغاء الموعد</button>`;
   actions += `<button class="btn btn-ghost" data-act="closeModal:">إغلاق</button>`;
   showModal(ap ? 'تعديل موعد' : 'حجز موعد جديد', body, actions);
+  initPatientPicker('a_pid', patients);
 
   $('#saveAptBtn').onclick = async () => {
     const btn = $('#saveAptBtn'); btn.disabled = true;
@@ -1024,12 +1129,14 @@ async function viewLab(c) {
 window.openLabForm = async function (id) {
   let l = {}, patients = [];
   try {
-    patients = (await apiGet('/patients?limit=100')).patients;
+    patients = (await apiGet('/patients?limit=500')).patients;
     if (id) l = (await apiGet('/labs')).labs.find(x => x.id === id) || {};
   } catch (e) { toast(e.message, 'err'); return; }
+  const selP = patients.find(p => p.id == l.patientId);
+  const selName = selP ? `${selP.fullName} — #${selP.fileNo}` : '';
   const body = `<div class="form-grid">
     <div class="field" style="grid-column:1/-1"><label>المريض <span class="req">*</span></label>
-      <select id="l_pid">${patients.map(p => `<option value="${p.id}" ${p.id == l.patientId ? 'selected' : ''}>${esc(p.fullName)} — #${p.fileNo}</option>`).join('')}</select></div>
+      ${patientPickerHTML('l_pid', l.patientId, selName)}</div>
     <div class="field"><label>تفاصيل العمل <span class="req">*</span></label><input id="l_work" value="${esc(l.workDetails || '')}" placeholder="تاج، جسر، جهاز تقويم..."></div>
     <div class="field"><label>اسم المختبر</label><input id="l_lab" value="${esc(l.labName || '')}" placeholder="مختبر..."></div>
     <div class="field"><label>المصاريف</label><input id="l_cost" type="number" min="0" value="${l.cost ?? ''}" placeholder="0"></div>
@@ -1041,6 +1148,7 @@ window.openLabForm = async function (id) {
   if (id) actions += `<button class="btn btn-danger" id="delLabBtn">${I.trash} حذف</button>`;
   actions += `<button class="btn btn-ghost" data-act="closeModal:">إلغاء</button>`;
   showModal(id ? 'تعديل عمل مختبر' : 'إضافة عمل مختبر', body, actions);
+  initPatientPicker('l_pid', patients);
 
   $('#saveLabBtn').onclick = async () => {
     const btn = $('#saveLabBtn'); btn.disabled = true;
