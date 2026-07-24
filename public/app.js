@@ -792,8 +792,8 @@ async function savePatient(id) {
 }
 
 function showFormErrors(e) {
-  if (e.issues?.length) e.issues.forEach(i => toast(`${i.message}`, 'err'));
-  else toast(e.message, 'err');
+  if (e.issues?.length) e.issues.forEach(i => toast(i.message || i.field || 'بيانات غير صالحة', 'err'));
+  else toast(e.message || 'بيانات غير صالحة', 'err');
 }
 
 window.openVisitForm = function (pid) {
