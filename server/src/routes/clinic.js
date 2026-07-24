@@ -335,34 +335,52 @@ clinicRouter.get('/finance', asyncH(async (req, res) => {
     });
 
     const { data: dueRows } = await supabase.from('v_patient_finance')
-      .select('patient_id, total, paid, due, patients(full_name, file_no)')
+      .select('patient_id, total, paid, due')
       .gt('due', 0)
       .order('due', { ascending: false })
       .limit(200);
 
-    const dueList = (dueRows || []).map(f => ({
-      patientId: f.patient_id,
-      patientName: f.patients?.full_name || '',
-      fileNo: f.patients?.file_no,
-      total: f.total,
-      paid: f.paid,
-      due: f.due
-    }));
+    let dueList = [];
+    if (dueRows && dueRows.length > 0) {
+      const pids = dueRows.map(d => d.patient_id);
+      const { data: pData } = await supabase.from('patients').select('id, full_name, file_no').in('id', pids);
+      const pMap = {};
+      (pData || []).forEach(p => { pMap[p.id] = p; });
+      dueList = dueRows.map(f => ({
+        patientId: f.patient_id,
+        patientName: pMap[f.patient_id]?.full_name || '',
+        fileNo: pMap[f.patient_id]?.file_no,
+        total: f.total,
+        paid: f.paid,
+        due: f.due
+      }));
+    }
 
     const { data: payRows } = await supabase.from('payments')
-      .select('id, amount, paid_at, method, patients(full_name), treatments(name)')
+      .select('id, amount, paid_at, method, patient_id, treatment_id')
       .is('voided_at', null)
       .order('id', { ascending: false })
       .limit(50);
 
-    const recentPayments = (payRows || []).map(p => ({
-      id: p.id,
-      amount: p.amount,
-      paidAt: p.paid_at,
-      method: p.method,
-      patientName: p.patients?.full_name || '',
-      treatmentName: p.treatments?.name || ''
-    }));
+    let recentPayments = [];
+    if (payRows && payRows.length > 0) {
+      const pids = payRows.map(p => p.patient_id);
+      const tids = payRows.map(p => p.treatment_id);
+      const { data: pData } = await supabase.from('patients').select('id, full_name').in('id', pids);
+      const { data: tData } = await supabase.from('treatments').select('id, name').in('id', tids);
+      const pMap = {}, tMap = {};
+      (pData || []).forEach(p => { pMap[p.id] = p.full_name; });
+      (tData || []).forEach(t => { tMap[t.id] = t.name; });
+
+      recentPayments = payRows.map(p => ({
+        id: p.id,
+        amount: p.amount,
+        paidAt: p.paid_at,
+        method: p.method,
+        patientName: pMap[p.patient_id] || '',
+        treatmentName: tMap[p.treatment_id] || ''
+      }));
+    }
 
     return res.json({ totals: { total, paid, due: total - paid }, dueList, recentPayments });
   }
@@ -549,14 +567,21 @@ clinicRouter.get('/dashboard', asyncH(async (req, res) => {
     }));
 
     const { data: dueRows } = await supabase.from('v_patient_finance')
-      .select('patient_id, due, patients(full_name)')
+      .select('patient_id, due')
       .gt('due', 0)
       .order('due', { ascending: false })
       .limit(20);
 
-    const dueInstallments = (dueRows || []).map(f => ({
-      patientId: f.patient_id, patientName: f.patients?.full_name || '', due: f.due
-    }));
+    let dueInstallments = [];
+    if (dueRows && dueRows.length > 0) {
+      const pids = dueRows.map(d => d.patient_id);
+      const { data: pData } = await supabase.from('patients').select('id, full_name').in('id', pids);
+      const pMap = {};
+      (pData || []).forEach(p => { pMap[p.id] = p.full_name; });
+      dueInstallments = dueRows.map(f => ({
+        patientId: f.patient_id, patientName: pMap[f.patient_id] || '', due: f.due
+      }));
+    }
 
     const { data: recentPats } = await supabase.from('patients')
       .select('id, file_no, full_name, age, gender, phone, created_at')

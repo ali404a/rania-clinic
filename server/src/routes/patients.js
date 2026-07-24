@@ -21,7 +21,7 @@ patientsRouter.get('/', validate(listQuerySchema, 'query'), asyncH(async (req, r
 
   if (supabase) {
     let query = supabase.from('patients')
-      .select('id, file_no, full_name, age, gender, phone, address, occupation, created_at, patient_medical(*), v_patient_finance(*)', { count: 'exact' })
+      .select('id, file_no, full_name, age, gender, phone, address, occupation, created_at, patient_medical(*)', { count: 'exact' })
       .is('deleted_at', null)
       .order('created_at', { ascending: false });
 
@@ -33,9 +33,21 @@ patientsRouter.get('/', validate(listQuerySchema, 'query'), asyncH(async (req, r
     if (error) throw new AppError(500, error.message, 'DB_ERROR');
 
     const total = count || 0;
+    const patientIds = (rows || []).map(r => r.id);
+    let financeMap = {};
+    if (patientIds.length > 0) {
+      const { data: finRows } = await supabase.from('v_patient_finance')
+        .select('patient_id, total, paid, due')
+        .in('patient_id', patientIds);
+
+      (finRows || []).forEach(f => {
+        financeMap[f.patient_id] = f;
+      });
+    }
+
     const formatted = (rows || []).map(r => {
       const med = Array.isArray(r.patient_medical) ? r.patient_medical[0] : r.patient_medical;
-      const fin = Array.isArray(r.v_patient_finance) ? r.v_patient_finance[0] : r.v_patient_finance;
+      const fin = financeMap[r.id] || { total: 0, paid: 0, due: 0 };
       return normalizePatient({
         id: r.id,
         fileNo: r.file_no,
@@ -50,15 +62,15 @@ patientsRouter.get('/', validate(listQuerySchema, 'query'), asyncH(async (req, r
         allergies: med?.allergies || null,
         isPregnant: med?.is_pregnant,
         isSmoker: med?.is_smoker,
-        total: fin?.total || 0,
-        paid: fin?.paid || 0,
-        due: fin?.due || 0,
+        total: fin.total || 0,
+        paid: fin.paid || 0,
+        due: fin.due || 0,
       });
     });
 
     return res.json({
       patients: formatted,
-      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
     });
   }
 
@@ -87,7 +99,7 @@ patientsRouter.get('/', validate(listQuerySchema, 'query'), asyncH(async (req, r
 
   res.json({
     patients: rows.map(normalizePatient),
-    pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    pagination: { page, limit, total, pages: Math.ceil(total / limit) || 1 },
   });
 }));
 
@@ -96,13 +108,13 @@ patientsRouter.get('/:id', asyncH(async (req, res) => {
   const id = Number(req.params.id);
 
   if (supabase) {
-    const { data: p } = await supabase.from('patients')
+    const { data: p, error } = await supabase.from('patients')
       .select('*, patient_medical(*)')
       .eq('id', id)
       .is('deleted_at', null)
       .maybeSingle();
 
-    if (!p) throw new AppError(404, 'المريض غير موجود', 'NOT_FOUND');
+    if (error || !p) throw new AppError(404, 'المريض غير موجود', 'NOT_FOUND');
 
     const med = Array.isArray(p.patient_medical) ? p.patient_medical[0] : p.patient_medical;
 
@@ -218,7 +230,6 @@ patientsRouter.post('/', csrfProtect, validate(patientSchema), asyncH(async (req
   const b = req.body;
 
   if (supabase) {
-    // Generate file_no atomically
     const { data: counterData } = await supabase.from('counters').select('value').eq('name', 'file_no').single();
     const currentNo = counterData?.value || 1000;
     const fileNo = currentNo + 1;
