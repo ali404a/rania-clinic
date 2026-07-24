@@ -1,0 +1,9 @@
+node_modules/
+db/clinic.db
+db/clinic.db-wal
+db/clinic.db-shm
+db/backups/
+*.log
+.vercel/
+.env
+.env.local

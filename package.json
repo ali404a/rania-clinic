@@ -1,0 +1,28 @@
+{
+  "name": "clinic-rania",
+  "version": "1.0.0",
+  "description": "",
+  "main": "index.js",
+  "directories": {
+    "doc": "docs"
+  },
+  "scripts": {
+    "start": "node server/src/index.js",
+    "test": "node --test tests/"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "dependencies": {
+    "better-sqlite3": "^11.10.0",
+    "cookie-parser": "^1.4.7",
+    "express": "^5.2.1",
+    "express-rate-limit": "^8.6.0",
+    "helmet": "^8.3.0",
+    "zod": "^4.4.3"
+  },
+  "type": "module",
+  "engines": {
+    "node": ">=18"
+  }
+}
