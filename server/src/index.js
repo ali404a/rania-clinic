@@ -103,7 +103,7 @@ app.use('/api', clinicRouter);
 app.use('/api/backup', backupRouter);
 
 /* ---------- الواجهة الأمامية ---------- */
-app.use(express.static(join(ROOT, 'public'), { index: 'index.html', maxAge: '1h' }));
+app.use(express.static(join(ROOT, 'public'), { index: 'index.html', maxAge: 0 }));
 app.get(/^\/(?!api).*/, (req, res) => res.sendFile(join(ROOT, 'public', 'index.html')));
 
 app.use('/api', notFound);
