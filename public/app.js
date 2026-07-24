@@ -30,6 +30,9 @@ const I = {
   file:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linejoin="round"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6M8 13h8M8 17h5"/></svg>`,
   trend:`<svg viewBox="0 0 80 30" fill="none" stroke="currentColor" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"><path d="M2 24l14-8 12 6 14-14 12 6 12-12"/></svg>`,
   logout:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4M16 17l5-5-5-5M21 12H9"/></svg>`,
+  backup:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M12 2C6.48 2 2 6.48 2 12s4.48 10 10 10 10-4.48 10-10"/><path d="M19 2v6h-6"/><path d="M22 12c0-3.17-1.53-5.98-3.9-7.75L19 8"/><path d="M12 8v4l3 1.5"/></svg>`,
+  download:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="7 10 12 15 17 10"/><line x1="12" y1="15" x2="12" y2="3"/></svg>`,
+  upload:`<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"><path d="M21 15v4a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2v-4"/><polyline points="17 8 12 3 7 8"/><line x1="12" y1="3" x2="12" y2="15"/></svg>`,
 };
 
 /* ---------- طبقة الاتصال بالخادم ---------- */
@@ -184,6 +187,7 @@ const NAV = [
   { id: 'alerts',       label: 'التنبيهات',        icon: 'bell',     roles: ['doctor','secretary'], badge: true },
   { id: 'users',        label: 'الحسابات',         icon: 'users',    roles: ['doctor'] },
   { id: 'audit',        label: 'سجل النظام',       icon: 'shield',   roles: ['doctor'] },
+  { id: 'backup',       label: 'النسخ الاحتياطي',  icon: 'backup',   roles: ['doctor'] },
 ];
 let currentView = 'dashboard';
 let alertCount = 0;
@@ -214,6 +218,7 @@ const META = {
   alerts: ['التنبيهات', 'التنبيهات المهمة'],
   users: ['الحسابات', 'إدارة حسابات الطاقم'],
   audit: ['سجل النظام', 'سجل العمليات والتدقيق'],
+  backup: ['النسخ الاحتياطي', 'نسخ احتياطي واستعادة البيانات'],
 };
 
 async function go(id) {
@@ -223,7 +228,7 @@ async function go(id) {
   $('#pgSub').textContent = META[id][1];
   const c = $('#content'); c.innerHTML = '<div class="empty"><div class="spinner"></div></div>'; c.scrollTop = 0;
   const views = { dashboard: viewDashboard, patients: viewPatients, appointments: viewAppointments,
-    chart: viewChart, finance: viewFinance, lab: viewLab, alerts: viewAlerts, users: viewUsers, audit: viewAudit };
+    chart: viewChart, finance: viewFinance, lab: viewLab, alerts: viewAlerts, users: viewUsers, audit: viewAudit, backup: viewBackup };
   try {
     c.innerHTML = '';
     await views[id](c);
@@ -498,7 +503,8 @@ window.openPatient = async function (id) {
     <button class="btn btn-ghost" data-act="openTreatmentForm:${p.id}">${I.money} علاج جديد</button>
     <button class="btn btn-ghost" data-act="openPaymentForm:${p.id}">${I.cash} تسجيل دفعة</button>
     <button class="btn btn-ghost" data-act="openAppointment:${p.id}">${I.calendar} حجز موعد</button>
-    <button class="btn btn-ghost" data-act="openPatientForm:${p.id}">${I.edit} تعديل</button>`;
+    <button class="btn btn-ghost" data-act="openPatientForm:${p.id}">${I.edit} تعديل</button>
+    ${isDoc ? `<button class="btn btn-danger" data-act="deletePatient:${p.id},'${esc(p.fullName)}'">${I.trash} حذف</button>` : ''}`;
 
   showModal('ملف المريض', body, actions, 'wide');
 
@@ -1228,9 +1234,10 @@ async function viewAudit(c) {
     APPOINTMENT_UPDATED:'تعديل موعد', APPOINTMENT_DELETED:'إلغاء موعد',
     TREATMENT_CREATED:'إضافة علاج', PAYMENT_RECEIVED:'تسجيل دفعة', PAYMENT_VOIDED:'إلغاء دفعة',
     LAB_CREATED:'إضافة عمل مختبر', LAB_UPDATED:'تعديل عمل مختبر', LAB_DELETED:'حذف عمل مختبر',
+    BACKUP_CREATED:'إنشاء نسخة احتياطية', BACKUP_RESTORED:'استعادة نسخة احتياطية',
   };
   const cls = (a) => a.includes('FAILED') || a.includes('BLOCKED') || a.includes('DELETED') ? 'rose'
-    : a.includes('CREATED') ? 'green' : a.includes('PAYMENT') ? 'gold' : 'blue';
+    : a.includes('CREATED') || a.includes('RESTORED') ? 'green' : a.includes('PAYMENT') ? 'gold' : a.includes('BACKUP') ? 'teal' : 'blue';
   const wrap = el('div', 'glass table-wrap'); const t = el('table');
   t.innerHTML = `<thead><tr><th>الوقت</th><th>المستخدم</th><th>العملية</th><th>الكيان</th></tr></thead>`;
   const tb = el('tbody');
@@ -1245,6 +1252,220 @@ async function viewAudit(c) {
   });
   t.appendChild(tb); wrap.appendChild(t); c.appendChild(wrap);
   if (!d.entries.length) c.appendChild(emptyState('لا توجد عمليات مسجلة', I.shield));
+}
+
+/* =========== حذف المريض =========== */
+window.deletePatient = function (id, name) {
+  const body = `<div style="text-align:center;padding:10px 0">
+    <div style="width:72px;height:72px;border-radius:20px;background:rgba(240,65,107,.12);display:inline-grid;place-items:center;margin-bottom:18px">
+      <svg viewBox="0 0 24 24" fill="none" stroke="#D42A54" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round" width="36" height="36"><path d="M3 6h18M8 6V4a1 1 0 0 1 1-1h6a1 1 0 0 1 1 1v2M5 6l1 14a2 2 0 0 0 2 2h8a2 2 0 0 0 2-2l1-14"/></svg>
+    </div>
+    <h3 style="font-size:18px;font-weight:800;margin-bottom:10px;color:var(--txt)">هل أنت متأكد من حذف المريض؟</h3>
+    <div style="color:var(--txt-2);font-size:14px;line-height:1.9">
+      سيتم حذف ملف المريض <b style="color:var(--danger)">${esc(name)}</b> بشكل نهائي.<br>
+      لا يمكن التراجع عن هذا الإجراء.
+    </div>
+  </div>`;
+  const actions = `<button class="btn btn-danger" id="delPatientBtn" style="gap:8px">${I.trash} نعم، حذف المريض</button>
+    <button class="btn btn-ghost" data-act="closeModal:" style="gap:8px">لا، إلغاء</button>`;
+  showModal('تأكيد حذف المريض', body, actions);
+  $('#delPatientBtn').onclick = async () => {
+    const btn = $('#delPatientBtn'); btn.disabled = true; btn.innerHTML = '<div class="spinner" style="width:18px;height:18px;border-width:2px"></div> جاري الحذف…';
+    try {
+      await apiDel('/patients/' + id);
+      toast('تم حذف المريض بنجاح', 'info');
+      closeModal();
+      go('patients');
+    } catch (e) {
+      toast(e.message, 'err');
+      btn.disabled = false;
+      btn.innerHTML = `${I.trash} نعم، حذف المريض`;
+    }
+  };
+};
+
+/* =========== النسخ الاحتياطي =========== */
+async function viewBackup(c) {
+  let backups = [];
+  try {
+    const d = await apiGet('/backup/list');
+    backups = d.backups || [];
+  } catch { /* لا توجد نسخ سابقة */ }
+
+  /* --- الإحصائيات العلوية --- */
+  const lastBackup = backups.length > 0 ? backups[0] : null;
+  const lastBackupDate = lastBackup ? new Date(lastBackup.created_at).toLocaleString('ar-IQ', { dateStyle: 'long', timeStyle: 'short' }) : 'لم يتم بعد';
+  const totalBackups = backups.length;
+
+  const sg = el('div', 'grid stat-grid');
+  [
+    { ic:'green', icon:I.backup, val: totalBackups, lbl:'عدد النسخ الاحتياطية' },
+    { ic:'blue', icon:I.clock, val: lastBackupDate, lbl:'آخر نسخة احتياطية', small: true },
+    { ic:'teal', icon:I.shield, val: 'نشط', lbl:'النسخ الاحتياطي التلقائي اليومي' },
+  ].forEach(s => {
+    const card = el('div', 'stat glass');
+    card.innerHTML = `<div class="ic ${s.ic}">${s.icon}</div><div class="val" style="font-size:${s.small ? '16px' : '30px'}">${s.val}</div><div class="lbl">${s.lbl}</div>`;
+    sg.appendChild(card);
+  });
+  c.appendChild(sg);
+
+  /* --- أزرار العمليات --- */
+  const actBox = el('div', 'glass'); actBox.style.cssText = 'padding:28px;margin-top:20px';
+  actBox.innerHTML = `
+    <div style="display:flex;align-items:center;gap:14px;margin-bottom:22px">
+      <div class="ic teal" style="width:50px;height:50px">${I.backup}</div>
+      <div>
+        <h3 style="font-size:17px;font-weight:800">إدارة النسخ الاحتياطي</h3>
+        <div style="font-size:13px;color:var(--txt-2)">يتم إنشاء نسخة احتياطية تلقائية يومياً. يمكنك أيضاً إنشاء نسخة يدوياً أو استعادة نسخة سابقة.</div>
+      </div>
+    </div>
+    <div style="display:flex;gap:14px;flex-wrap:wrap">
+      <button class="btn btn-primary" id="manualBackupBtn">${I.download} إنشاء نسخة احتياطية الآن</button>
+      <label class="btn btn-ghost" style="cursor:pointer">
+        ${I.upload} استعادة من ملف
+        <input type="file" accept=".json" id="restoreFileInput" style="display:none">
+      </label>
+    </div>
+    <div id="backupProgress" style="margin-top:16px;display:none">
+      <div style="display:flex;align-items:center;gap:12px;padding:16px;background:rgba(14,74,228,.06);border:1px solid rgba(14,74,228,.15);border-radius:14px">
+        <div class="spinner" style="width:22px;height:22px;border-width:2px"></div>
+        <span id="backupProgressText" style="font-size:14px;font-weight:600;color:var(--txt-2)">جاري المعالجة…</span>
+      </div>
+    </div>`;
+  c.appendChild(actBox);
+
+  /* --- جدول النسخ السابقة --- */
+  const sec = el('div');
+  sec.innerHTML = `<div class="section-head"><h2>النسخ الاحتياطية السابقة</h2><div class="line"></div><span class="pill blue"><span class="dot"></span>${totalBackups} نسخة</span></div>`;
+  c.appendChild(sec);
+
+  if (backups.length) {
+    const wrap = el('div', 'glass table-wrap'); const t = el('table');
+    t.innerHTML = `<thead><tr><th>التاريخ والوقت</th><th>الحجم</th><th>الجداول</th><th></th></tr></thead>`;
+    const tb = el('tbody');
+    backups.forEach(b => {
+      const tr = el('tr'); tr.style.cursor = 'default';
+      const dt = new Date(b.created_at);
+      const sizeKB = b.size_bytes ? (b.size_bytes / 1024).toFixed(1) + ' KB' : '—';
+      tr.innerHTML = `<td>
+        <div class="cell-p">
+          <span class="mini-av" style="background:linear-gradient(145deg,rgba(14,74,228,.8),rgba(15,183,196,.8));width:38px;height:38px;font-size:14px">${I.backup}</span>
+          <div><div class="nm">${dt.toLocaleString('ar-IQ', { dateStyle: 'long', timeStyle: 'short' })}</div>
+          <div class="sub">${relLabel(b.created_at.slice(0, 10))}</div></div>
+        </div></td>
+        <td><span class="pill gray">${sizeKB}</span></td>
+        <td style="color:var(--txt-2)">${b.table_count || '—'} جدول</td>
+        <td style="display:flex;gap:8px">
+          <button class="btn btn-ghost btn-sm backup-download" data-id="${b.id}" title="تحميل">${I.download}</button>
+          <button class="btn btn-danger btn-sm backup-restore" data-id="${b.id}" title="استعادة">${I.backup}</button>
+        </td>`;
+      tb.appendChild(tr);
+    });
+    t.appendChild(tb); wrap.appendChild(t); c.appendChild(wrap);
+
+    /* Download a specific backup */
+    wrap.querySelectorAll('.backup-download').forEach(btn => {
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+        const bid = btn.dataset.id;
+        btn.disabled = true;
+        try {
+          const d = await apiGet('/backup/download/' + bid);
+          const blob = new Blob([JSON.stringify(d, null, 2)], { type: 'application/json' });
+          const url = URL.createObjectURL(blob);
+          const a = document.createElement('a'); a.href = url;
+          a.download = `clinic-backup-${new Date().toISOString().slice(0,10)}.json`;
+          a.click(); URL.revokeObjectURL(url);
+          toast('تم تحميل النسخة الاحتياطية');
+        } catch (e) { toast(e.message, 'err'); }
+        btn.disabled = false;
+      };
+    });
+
+    /* Restore a specific stored backup */
+    wrap.querySelectorAll('.backup-restore').forEach(btn => {
+      btn.onclick = async (e) => {
+        e.stopPropagation();
+        const bid = btn.dataset.id;
+        const confirmBody = `<div style="text-align:center;padding:10px 0">
+          <div style="width:72px;height:72px;border-radius:20px;background:rgba(181,117,15,.12);display:inline-grid;place-items:center;margin-bottom:18px">
+            <svg viewBox="0 0 24 24" fill="none" stroke="#B5750F" stroke-width="1.9" width="36" height="36"><path d="M12 3.2L2.2 20h19.6L12 3.2z"/><path d="M12 10v4.2M12 17.4v.1"/></svg>
+          </div>
+          <h3 style="font-size:18px;font-weight:800;margin-bottom:10px">هل أنت متأكد من الاستعادة؟</h3>
+          <div style="color:var(--txt-2);font-size:14px;line-height:1.9">
+            سيتم <b style="color:var(--danger)">استبدال جميع البيانات الحالية</b> ببيانات هذه النسخة الاحتياطية.<br>
+            هذا الإجراء لا يمكن التراجع عنه.
+          </div>
+        </div>`;
+        const confirmActions = `<button class="btn btn-danger" id="confirmRestoreBtn">${I.backup} نعم، استعادة البيانات</button>
+          <button class="btn btn-ghost" data-act="closeModal:">لا، إلغاء</button>`;
+        showModal('تأكيد الاستعادة', confirmBody, confirmActions);
+        $('#confirmRestoreBtn').onclick = async () => {
+          const rb = $('#confirmRestoreBtn'); rb.disabled = true; rb.textContent = 'جاري الاستعادة…';
+          try {
+            await apiPost('/backup/restore/' + bid);
+            toast('تم استعادة البيانات بنجاح!', 'ok');
+            closeModal(); go('backup');
+          } catch (e) { toast(e.message, 'err'); rb.disabled = false; rb.textContent = 'نعم، استعادة البيانات'; }
+        };
+      };
+    });
+  } else {
+    c.appendChild(emptyState('لا توجد نسخ احتياطية سابقة', I.backup));
+  }
+
+  /* --- Manual Backup Button --- */
+  $('#manualBackupBtn').onclick = async () => {
+    const btn = $('#manualBackupBtn'); btn.disabled = true;
+    const prog = $('#backupProgress'); prog.style.display = 'block';
+    $('#backupProgressText').textContent = 'جاري إنشاء النسخة الاحتياطية…';
+    try {
+      const d = await apiPost('/backup/create');
+      /* Download the backup file */
+      const blob = new Blob([JSON.stringify(d.backup, null, 2)], { type: 'application/json' });
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement('a'); a.href = url;
+      a.download = `clinic-backup-${new Date().toISOString().slice(0,10)}.json`;
+      a.click(); URL.revokeObjectURL(url);
+      toast('تم إنشاء وتحميل النسخة الاحتياطية بنجاح');
+      prog.style.display = 'none';
+      go('backup'); /* Refresh the page */
+    } catch (e) { toast(e.message, 'err'); prog.style.display = 'none'; }
+    btn.disabled = false;
+  };
+
+  /* --- Restore From File --- */
+  $('#restoreFileInput').onchange = async (e) => {
+    const file = e.target.files[0]; if (!file) return;
+    /* Read and validate */
+    const text = await file.text();
+    let data;
+    try { data = JSON.parse(text); }
+    catch { toast('الملف غير صالح — يجب أن يكون ملف JSON', 'err'); return; }
+
+    const confirmBody = `<div style="text-align:center;padding:10px 0">
+      <div style="width:72px;height:72px;border-radius:20px;background:rgba(181,117,15,.12);display:inline-grid;place-items:center;margin-bottom:18px">
+        <svg viewBox="0 0 24 24" fill="none" stroke="#B5750F" stroke-width="1.9" width="36" height="36"><path d="M12 3.2L2.2 20h19.6L12 3.2z"/><path d="M12 10v4.2M12 17.4v.1"/></svg>
+      </div>
+      <h3 style="font-size:18px;font-weight:800;margin-bottom:10px">هل أنت متأكد من استعادة هذا الملف؟</h3>
+      <div style="color:var(--txt-2);font-size:14px;line-height:1.9">
+        الملف: <b>${esc(file.name)}</b> (${(file.size / 1024).toFixed(1)} KB)<br>
+        سيتم <b style="color:var(--danger)">استبدال جميع البيانات الحالية</b> ببيانات هذا الملف.
+      </div>
+    </div>`;
+    const confirmActions = `<button class="btn btn-danger" id="confirmFileRestoreBtn">${I.upload} نعم، استعادة من الملف</button>
+      <button class="btn btn-ghost" data-act="closeModal:">لا، إلغاء</button>`;
+    showModal('تأكيد الاستعادة من ملف', confirmBody, confirmActions);
+    $('#confirmFileRestoreBtn').onclick = async () => {
+      const rb = $('#confirmFileRestoreBtn'); rb.disabled = true; rb.textContent = 'جاري الاستعادة…';
+      try {
+        await apiPost('/backup/restore-file', { data });
+        toast('تم استعادة البيانات من الملف بنجاح!', 'ok');
+        closeModal(); go('backup');
+      } catch (e) { toast(e.message, 'err'); rb.disabled = false; rb.textContent = 'نعم، استعادة من الملف'; }
+    };
+    e.target.value = ''; /* Reset file input */
+  };
 }
 
 /* =========== البحث السريع =========== */
@@ -1297,6 +1518,7 @@ const ACTIONS = {
   openUserForm:       (id) => openUserForm(id ? Number(id) : undefined),
   openResetPassword:  (id, name) => openResetPassword(Number(id), name),
   deleteUser:         (id, name) => deleteUser(Number(id), name),
+  deletePatient:      (id, name) => deletePatient(Number(id), name),
   setCalMode:         (m) => setCalMode(m),
   calShift:           (d) => calShift(Number(d)),
   calToday:           () => calToday(),

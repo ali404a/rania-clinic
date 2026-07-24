@@ -11,6 +11,7 @@ import { errorHandler, notFound } from './middleware/security.js';
 import { authRouter } from './routes/auth.js';
 import { patientsRouter } from './routes/patients.js';
 import { clinicRouter } from './routes/clinic.js';
+import { backupRouter, autoBackup } from './routes/backup.js';
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const ROOT = join(__dirname, '..', '..');
@@ -61,7 +62,7 @@ app.use(helmet({
     ? { maxAge: 31536000, includeSubDomains: true, preload: true } : false,
 }));
 
-app.use(express.json({ limit: '200kb' }));   // حد حجم الطلب — يمنع استنزاف الذاكرة
+app.use(express.json({ limit: '50mb' }));   // حد حجم الطلب — يدعم رفع النسخ الاحتياطية
 app.use(cookieParser());
 
 /* ---------- تحديد المعدل ---------- */
@@ -99,6 +100,7 @@ app.get('/api/health', (req, res) => {
 app.use('/api/auth', authRouter);
 app.use('/api/patients', patientsRouter);
 app.use('/api', clinicRouter);
+app.use('/api/backup', backupRouter);
 
 /* ---------- الواجهة الأمامية ---------- */
 app.use(express.static(join(ROOT, 'public'), { index: 'index.html', maxAge: '1h' }));
@@ -116,6 +118,14 @@ setInterval(() => {
 setInterval(() => {
   try { backup(); } catch (e) { console.error('[backup] فشل:', e.message); }
 }, 24 * 60 * 60 * 1000).unref();
+
+setInterval(() => {
+  autoBackup().catch(e => console.error('[auto-backup] فشل:', e.message));
+}, 24 * 60 * 60 * 1000).unref();
+// Run first auto-backup after 60 seconds of startup
+setTimeout(() => {
+  autoBackup().catch(e => console.error('[auto-backup-initial] فشل:', e.message));
+}, 60_000).unref();
 
 let server = null;
 
