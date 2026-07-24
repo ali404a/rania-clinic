@@ -11,9 +11,9 @@ export class AppError extends Error {
 }
 
 /** يتطلب جلسة صالحة */
-export function requireAuth(req, res, next) {
+export async function requireAuth(req, res, next) {
   const token = req.cookies?.[SESSION_COOKIE];
-  const session = getSession(token);
+  const session = await getSession(token);
   if (!session) {
     return res.status(401).json({ error: 'يجب تسجيل الدخول', code: 'UNAUTHENTICATED' });
   }

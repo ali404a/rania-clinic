@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { db, tx, nextFileNo } from '../lib/db.js';
+import { supabase } from '../lib/supabase.js';
 import { audit } from '../lib/auth.js';
 import { requireAuth, requireRole, csrfProtect, validate, AppError, asyncH } from '../middleware/security.js';
 import { patientSchema, visitSchema, toothSchema, listQuerySchema } from '../lib/schemas.js';
@@ -7,10 +8,59 @@ import { patientSchema, visitSchema, toothSchema, listQuerySchema } from '../lib
 export const patientsRouter = Router();
 patientsRouter.use(requireAuth);
 
-/* ---------- قائمة المرضى (مرقّمة — لا تُرجع الآلاف دفعة واحدة) ---------- */
-patientsRouter.get('/', validate(listQuerySchema, 'query'), asyncH((req, res) => {
+const normalizePatient = (r) => ({
+  ...r,
+  isPregnant: r.isPregnant === true || r.isPregnant === 1,
+  isSmoker: r.isSmoker === true || r.isSmoker === 1,
+});
+
+/* ---------- قائمة المرضى ---------- */
+patientsRouter.get('/', validate(listQuerySchema, 'query'), asyncH(async (req, res) => {
   const { q, page, limit } = req.validatedQuery;
   const offset = (page - 1) * limit;
+
+  if (supabase) {
+    let query = supabase.from('patients')
+      .select('id, file_no, full_name, age, gender, phone, address, occupation, created_at, patient_medical(*), v_patient_finance(*)', { count: 'exact' })
+      .is('deleted_at', null)
+      .order('created_at', { ascending: false });
+
+    if (q) {
+      query = query.or(`full_name.ilike.%${q}%,phone.ilike.%${q}%`);
+    }
+
+    const { data: rows, count, error } = await query.range(offset, offset + limit - 1);
+    if (error) throw new AppError(500, error.message, 'DB_ERROR');
+
+    const total = count || 0;
+    const formatted = (rows || []).map(r => {
+      const med = Array.isArray(r.patient_medical) ? r.patient_medical[0] : r.patient_medical;
+      const fin = Array.isArray(r.v_patient_finance) ? r.v_patient_finance[0] : r.v_patient_finance;
+      return normalizePatient({
+        id: r.id,
+        fileNo: r.file_no,
+        fullName: r.full_name,
+        age: r.age,
+        gender: r.gender,
+        phone: r.phone,
+        address: r.address,
+        occupation: r.occupation,
+        createdAt: r.created_at,
+        chronicDiseases: med?.chronic_diseases || null,
+        allergies: med?.allergies || null,
+        isPregnant: med?.is_pregnant,
+        isSmoker: med?.is_smoker,
+        total: fin?.total || 0,
+        paid: fin?.paid || 0,
+        due: fin?.due || 0,
+      });
+    });
+
+    return res.json({
+      patients: formatted,
+      pagination: { page, limit, total, pages: Math.ceil(total / limit) },
+    });
+  }
 
   const where = ['p.deleted_at IS NULL'];
   const params = [];
@@ -41,15 +91,88 @@ patientsRouter.get('/', validate(listQuerySchema, 'query'), asyncH((req, res) =>
   });
 }));
 
-const normalizePatient = (r) => ({
-  ...r,
-  isPregnant: r.isPregnant === 1,
-  isSmoker: r.isSmoker === 1,
-});
-
 /* ---------- ملف مريض كامل ---------- */
-patientsRouter.get('/:id', asyncH((req, res) => {
+patientsRouter.get('/:id', asyncH(async (req, res) => {
   const id = Number(req.params.id);
+
+  if (supabase) {
+    const { data: p } = await supabase.from('patients')
+      .select('*, patient_medical(*)')
+      .eq('id', id)
+      .is('deleted_at', null)
+      .maybeSingle();
+
+    if (!p) throw new AppError(404, 'المريض غير موجود', 'NOT_FOUND');
+
+    const med = Array.isArray(p.patient_medical) ? p.patient_medical[0] : p.patient_medical;
+
+    const { data: visitsRows } = await supabase.from('visits')
+      .select('id, visit_date, reason, diagnosis, treatment_plan, treatment_done')
+      .eq('patient_id', id)
+      .is('deleted_at', null)
+      .order('visit_date', { ascending: false });
+
+    const visits = (visitsRows || []).map(v => ({
+      id: v.id, visitDate: v.visit_date, reason: v.reason, diagnosis: v.diagnosis,
+      treatmentPlan: v.treatment_plan, treatmentDone: v.treatment_done
+    }));
+
+    const { data: treatRows } = await supabase.from('treatments')
+      .select('id, name, details, total_cost, paid_amount, started_at')
+      .eq('patient_id', id)
+      .is('deleted_at', null)
+      .order('id', { ascending: false });
+
+    const treatments = (treatRows || []).map(t => ({
+      id: t.id, name: t.name, details: t.details, totalCost: t.total_cost,
+      paidAmount: t.paid_amount, startedAt: t.started_at
+    }));
+
+    const { data: chartRows } = await supabase.from('tooth_chart')
+      .select('tooth_no, condition')
+      .eq('patient_id', id);
+
+    const chart = {};
+    (chartRows || []).forEach(t => { chart[t.tooth_no] = t.condition; });
+
+    const { data: aptRows } = await supabase.from('appointments')
+      .select('id, appointment_date, appointment_time, duration_min, treatment_type, status')
+      .eq('patient_id', id)
+      .is('deleted_at', null)
+      .order('appointment_date', { ascending: false })
+      .limit(20);
+
+    const appointments = (aptRows || []).map(a => ({
+      id: a.id, appointmentDate: a.appointment_date, appointmentTime: a.appointment_time,
+      durationMin: a.duration_min, treatmentType: a.treatment_type, status: a.status
+    }));
+
+    const { data: finRow } = await supabase.from('v_patient_finance')
+      .select('total, paid, due')
+      .eq('patient_id', id)
+      .maybeSingle();
+
+    const finance = finRow || { total: 0, paid: 0, due: 0 };
+
+    const patientFormatted = normalizePatient({
+      id: p.id,
+      fileNo: p.file_no,
+      fullName: p.full_name,
+      age: p.age,
+      gender: p.gender,
+      phone: p.phone,
+      address: p.address,
+      occupation: p.occupation,
+      createdAt: p.created_at,
+      chronicDiseases: med?.chronic_diseases || null,
+      allergies: med?.allergies || null,
+      isPregnant: med?.is_pregnant,
+      isSmoker: med?.is_smoker,
+    });
+
+    return res.json({ patient: patientFormatted, visits, treatments, chart, appointments, finance });
+  }
+
   const p = db.prepare(`
     SELECT p.id, p.file_no AS fileNo, p.full_name AS fullName, p.age, p.gender,
            p.phone, p.address, p.occupation, p.created_at AS createdAt,
@@ -90,9 +213,42 @@ patientsRouter.get('/:id', asyncH((req, res) => {
   res.json({ patient: normalizePatient(p), visits, treatments, chart, appointments, finance: fin });
 }));
 
-/* ---------- إنشاء مريض (رقم ملف ذرّي) ---------- */
-patientsRouter.post('/', csrfProtect, validate(patientSchema), asyncH((req, res) => {
+/* ---------- إنشاء مريض ---------- */
+patientsRouter.post('/', csrfProtect, validate(patientSchema), asyncH(async (req, res) => {
   const b = req.body;
+
+  if (supabase) {
+    // Generate file_no atomically
+    const { data: counterData } = await supabase.from('counters').select('value').eq('name', 'file_no').single();
+    const currentNo = counterData?.value || 1000;
+    const fileNo = currentNo + 1;
+    await supabase.from('counters').update({ value: fileNo }).eq('name', 'file_no');
+
+    const { data: newPatient, error: pErr } = await supabase.from('patients').insert({
+      file_no: fileNo,
+      full_name: b.fullName,
+      age: b.age,
+      gender: b.gender,
+      phone: b.phone,
+      address: b.address || null,
+      occupation: b.occupation || null,
+      created_by: req.user.id
+    }).select().single();
+
+    if (pErr) throw new AppError(500, pErr.message, 'DB_ERROR');
+
+    await supabase.from('patient_medical').insert({
+      patient_id: newPatient.id,
+      chronic_diseases: b.chronicDiseases || null,
+      allergies: b.allergies || null,
+      is_pregnant: b.isPregnant || false,
+      is_smoker: b.isSmoker || false
+    });
+
+    await audit(req.user.id, 'PATIENT_CREATED', 'patient', newPatient.id, { fileNo }, req.ip);
+    return res.status(201).json({ patient: { id: newPatient.id, fileNo, ...b } });
+  }
+
   const result = tx(() => {
     const fileNo = nextFileNo();
     const info = db.prepare(`
@@ -108,14 +264,41 @@ patientsRouter.post('/', csrfProtect, validate(patientSchema), asyncH((req, res)
            b.isPregnant ? 1 : 0, b.isSmoker ? 1 : 0);
     return { id: pid, fileNo };
   });
-  audit(req.user.id, 'PATIENT_CREATED', 'patient', result.id, { fileNo: result.fileNo }, req.ip);
+  await audit(req.user.id, 'PATIENT_CREATED', 'patient', result.id, { fileNo: result.fileNo }, req.ip);
   res.status(201).json({ patient: { ...result, ...b } });
 }));
 
 /* ---------- تعديل مريض ---------- */
-patientsRouter.patch('/:id', csrfProtect, validate(patientSchema), asyncH((req, res) => {
+patientsRouter.patch('/:id', csrfProtect, validate(patientSchema), asyncH(async (req, res) => {
   const id = Number(req.params.id);
   const b = req.body;
+
+  if (supabase) {
+    const { data: exists } = await supabase.from('patients').select('id').eq('id', id).is('deleted_at', null).maybeSingle();
+    if (!exists) throw new AppError(404, 'المريض غير موجود', 'NOT_FOUND');
+
+    await supabase.from('patients').update({
+      full_name: b.fullName,
+      age: b.age,
+      gender: b.gender,
+      phone: b.phone,
+      address: b.address || null,
+      occupation: b.occupation || null
+    }).eq('id', id);
+
+    await supabase.from('patient_medical').upsert({
+      patient_id: id,
+      chronic_diseases: b.chronicDiseases || null,
+      allergies: b.allergies || null,
+      is_pregnant: b.isPregnant || false,
+      is_smoker: b.isSmoker || false,
+      updated_at: new Date().toISOString()
+    });
+
+    await audit(req.user.id, 'PATIENT_UPDATED', 'patient', id, null, req.ip);
+    return res.json({ ok: true });
+  }
+
   const exists = db.prepare('SELECT id FROM patients WHERE id = ? AND deleted_at IS NULL').get(id);
   if (!exists) throw new AppError(404, 'المريض غير موجود', 'NOT_FOUND');
 
@@ -134,23 +317,57 @@ patientsRouter.patch('/:id', csrfProtect, validate(patientSchema), asyncH((req, 
     `).run(id, b.chronicDiseases || null, b.allergies || null,
            b.isPregnant ? 1 : 0, b.isSmoker ? 1 : 0);
   });
-  audit(req.user.id, 'PATIENT_UPDATED', 'patient', id, null, req.ip);
+  await audit(req.user.id, 'PATIENT_UPDATED', 'patient', id, null, req.ip);
   res.json({ ok: true });
 }));
 
-/* ---------- حذف منطقي (الطبيب فقط) ---------- */
-patientsRouter.delete('/:id', requireRole('doctor'), csrfProtect, asyncH((req, res) => {
+/* ---------- حذف مريض (حذف منطقي) ---------- */
+patientsRouter.delete('/:id', requireRole('doctor'), csrfProtect, asyncH(async (req, res) => {
   const id = Number(req.params.id);
+
+  if (supabase) {
+    const { data, error } = await supabase.from('patients')
+      .update({ deleted_at: new Date().toISOString() })
+      .eq('id', id)
+      .is('deleted_at', null)
+      .select();
+
+    if (error || !data || data.length === 0) throw new AppError(404, 'المريض غير موجود', 'NOT_FOUND');
+    await audit(req.user.id, 'PATIENT_DELETED', 'patient', id, null, req.ip);
+    return res.json({ ok: true });
+  }
+
   const r = db.prepare(`UPDATE patients SET deleted_at = datetime('now') WHERE id = ? AND deleted_at IS NULL`).run(id);
   if (!r.changes) throw new AppError(404, 'المريض غير موجود', 'NOT_FOUND');
-  audit(req.user.id, 'PATIENT_DELETED', 'patient', id, null, req.ip);
+  await audit(req.user.id, 'PATIENT_DELETED', 'patient', id, null, req.ip);
   res.json({ ok: true });
 }));
 
-/* =============== الزيارات (الطبيب فقط) =============== */
+/* =============== الزيارات =============== */
 patientsRouter.post('/visits', requireRole('doctor'), csrfProtect,
-  validate(visitSchema), asyncH((req, res) => {
+  validate(visitSchema), asyncH(async (req, res) => {
     const b = req.body;
+
+    if (supabase) {
+      const { data: p } = await supabase.from('patients').select('id').eq('id', b.patientId).is('deleted_at', null).maybeSingle();
+      if (!p) throw new AppError(404, 'المريض غير موجود', 'NOT_FOUND');
+
+      const { data: newVisit, error } = await supabase.from('visits').insert({
+        patient_id: b.patientId,
+        visit_date: b.visitDate,
+        reason: b.reason,
+        diagnosis: b.diagnosis || null,
+        treatment_plan: b.treatmentPlan || null,
+        treatment_done: b.treatmentDone || null,
+        created_by: req.user.id
+      }).select().single();
+
+      if (error) throw new AppError(500, error.message, 'DB_ERROR');
+
+      await audit(req.user.id, 'VISIT_CREATED', 'visit', newVisit.id, { patientId: b.patientId }, req.ip);
+      return res.status(201).json({ id: newVisit.id });
+    }
+
     const p = db.prepare('SELECT id FROM patients WHERE id = ? AND deleted_at IS NULL').get(b.patientId);
     if (!p) throw new AppError(404, 'المريض غير موجود', 'NOT_FOUND');
 
@@ -160,14 +377,33 @@ patientsRouter.post('/visits', requireRole('doctor'), csrfProtect,
     `).run(b.patientId, b.visitDate, b.reason, b.diagnosis || null,
            b.treatmentPlan || null, b.treatmentDone || null, req.user.id);
 
-    audit(req.user.id, 'VISIT_CREATED', 'visit', info.lastInsertRowid, { patientId: b.patientId }, req.ip);
+    await audit(req.user.id, 'VISIT_CREATED', 'visit', info.lastInsertRowid, { patientId: b.patientId }, req.ip);
     res.status(201).json({ id: Number(info.lastInsertRowid) });
   }));
 
-/* =============== مخطط الأسنان (الطبيب فقط) =============== */
+/* =============== مخطط الأسنان =============== */
 patientsRouter.put('/tooth', requireRole('doctor'), csrfProtect,
-  validate(toothSchema), asyncH((req, res) => {
+  validate(toothSchema), asyncH(async (req, res) => {
     const { patientId, toothNo, condition } = req.body;
+
+    if (supabase) {
+      const { data: p } = await supabase.from('patients').select('id').eq('id', patientId).is('deleted_at', null).maybeSingle();
+      if (!p) throw new AppError(404, 'المريض غير موجود', 'NOT_FOUND');
+
+      if (condition === '') {
+        await supabase.from('tooth_chart').delete().match({ patient_id: patientId, tooth_no: toothNo });
+      } else {
+        await supabase.from('tooth_chart').upsert({
+          patient_id: patientId,
+          tooth_no: toothNo,
+          condition,
+          updated_by: req.user.id,
+          updated_at: new Date().toISOString()
+        });
+      }
+      return res.json({ ok: true });
+    }
+
     const p = db.prepare('SELECT id FROM patients WHERE id = ? AND deleted_at IS NULL').get(patientId);
     if (!p) throw new AppError(404, 'المريض غير موجود', 'NOT_FOUND');
 

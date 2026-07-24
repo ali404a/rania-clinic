@@ -1,5 +1,6 @@
 import { Router } from 'express';
 import { db, tx } from '../lib/db.js';
+import { supabase } from '../lib/supabase.js';
 import { audit } from '../lib/auth.js';
 import { requireAuth, requireRole, csrfProtect, validate, AppError, asyncH } from '../middleware/security.js';
 import { appointmentSchema, treatmentSchema, paymentSchema, labSchema } from '../lib/schemas.js';
@@ -10,8 +11,39 @@ clinicRouter.use(requireAuth);
 /* =====================================================================
    المواعيد
 ===================================================================== */
-clinicRouter.get('/appointments', asyncH((req, res) => {
+clinicRouter.get('/appointments', asyncH(async (req, res) => {
   const { from, to } = req.query;
+
+  if (supabase) {
+    let query = supabase.from('appointments')
+      .select('id, patient_id, appointment_date, appointment_time, duration_min, treatment_type, status, notes, patients(full_name, file_no, phone)')
+      .is('deleted_at', null)
+      .order('appointment_date')
+      .order('appointment_time')
+      .limit(1000);
+
+    if (from) query = query.gte('appointment_date', String(from));
+    if (to)   query = query.lte('appointment_date', String(to));
+
+    const { data: rows, error } = await query;
+    if (error) throw new AppError(500, error.message, 'DB_ERROR');
+
+    const formatted = (rows || []).map(a => ({
+      id: a.id,
+      patientId: a.patient_id,
+      appointmentDate: a.appointment_date,
+      appointmentTime: a.appointment_time,
+      durationMin: a.duration_min,
+      treatmentType: a.treatment_type,
+      status: a.status,
+      notes: a.notes,
+      patientName: a.patients?.full_name || '',
+      fileNo: a.patients?.file_no,
+      phone: a.patients?.phone,
+    }));
+    return res.json({ appointments: formatted });
+  }
+
   const where = ['a.deleted_at IS NULL'];
   const params = [];
   if (from) { where.push('a.appointment_date >= ?'); params.push(String(from)); }
@@ -31,8 +63,33 @@ clinicRouter.get('/appointments', asyncH((req, res) => {
   res.json({ appointments: rows });
 }));
 
-clinicRouter.post('/appointments', csrfProtect, validate(appointmentSchema), asyncH((req, res) => {
+clinicRouter.post('/appointments', csrfProtect, validate(appointmentSchema), asyncH(async (req, res) => {
   const b = req.body;
+
+  if (supabase) {
+    const { data: p } = await supabase.from('patients').select('id').eq('id', b.patientId).is('deleted_at', null).maybeSingle();
+    if (!p) throw new AppError(404, 'المريض غير موجود', 'NOT_FOUND');
+
+    const { data: created, error } = await supabase.from('appointments').insert({
+      patient_id: b.patientId,
+      appointment_date: b.appointmentDate,
+      appointment_time: b.appointmentTime,
+      duration_min: b.durationMin,
+      treatment_type: b.treatmentType,
+      status: b.status,
+      notes: b.notes || null,
+      created_by: req.user.id
+    }).select().single();
+
+    if (error) {
+      if (error.code === '23505') throw new AppError(409, 'هذا الوقت محجوز لموعد آخر', 'SLOT_TAKEN');
+      throw new AppError(500, error.message, 'DB_ERROR');
+    }
+
+    await audit(req.user.id, 'APPOINTMENT_CREATED', 'appointment', created.id, b, req.ip);
+    return res.status(201).json({ id: created.id });
+  }
+
   const p = db.prepare('SELECT id FROM patients WHERE id = ? AND deleted_at IS NULL').get(b.patientId);
   if (!p) throw new AppError(404, 'المريض غير موجود', 'NOT_FOUND');
 
@@ -43,10 +100,9 @@ clinicRouter.post('/appointments', csrfProtect, validate(appointmentSchema), asy
       VALUES (?,?,?,?,?,?,?,?)
     `).run(b.patientId, b.appointmentDate, b.appointmentTime, b.durationMin,
            b.treatmentType, b.status, b.notes || null, req.user.id);
-    audit(req.user.id, 'APPOINTMENT_CREATED', 'appointment', info.lastInsertRowid, b, req.ip);
+    await audit(req.user.id, 'APPOINTMENT_CREATED', 'appointment', info.lastInsertRowid, b, req.ip);
     res.status(201).json({ id: Number(info.lastInsertRowid) });
   } catch (e) {
-    // القيد الفريد يمنع الحجز المزدوج على مستوى القاعدة
     if (String(e.message).includes('UNIQUE')) {
       throw new AppError(409, 'هذا الوقت محجوز لموعد آخر', 'SLOT_TAKEN');
     }
@@ -54,9 +110,33 @@ clinicRouter.post('/appointments', csrfProtect, validate(appointmentSchema), asy
   }
 }));
 
-clinicRouter.patch('/appointments/:id', csrfProtect, validate(appointmentSchema), asyncH((req, res) => {
+clinicRouter.patch('/appointments/:id', csrfProtect, validate(appointmentSchema), asyncH(async (req, res) => {
   const id = Number(req.params.id);
   const b = req.body;
+
+  if (supabase) {
+    const { data: exists } = await supabase.from('appointments').select('id').eq('id', id).is('deleted_at', null).maybeSingle();
+    if (!exists) throw new AppError(404, 'الموعد غير موجود', 'NOT_FOUND');
+
+    const { error } = await supabase.from('appointments').update({
+      patient_id: b.patientId,
+      appointment_date: b.appointmentDate,
+      appointment_time: b.appointmentTime,
+      duration_min: b.durationMin,
+      treatment_type: b.treatmentType,
+      status: b.status,
+      notes: b.notes || null
+    }).eq('id', id);
+
+    if (error) {
+      if (error.code === '23505') throw new AppError(409, 'هذا الوقت محجوز لموعد آخر', 'SLOT_TAKEN');
+      throw new AppError(500, error.message, 'DB_ERROR');
+    }
+
+    await audit(req.user.id, 'APPOINTMENT_UPDATED', 'appointment', id, b, req.ip);
+    return res.json({ ok: true });
+  }
+
   const exists = db.prepare('SELECT id FROM appointments WHERE id = ? AND deleted_at IS NULL').get(id);
   if (!exists) throw new AppError(404, 'الموعد غير موجود', 'NOT_FOUND');
   try {
@@ -65,7 +145,7 @@ clinicRouter.patch('/appointments/:id', csrfProtect, validate(appointmentSchema)
         duration_min=?, treatment_type=?, status=?, notes=? WHERE id = ?
     `).run(b.patientId, b.appointmentDate, b.appointmentTime, b.durationMin,
            b.treatmentType, b.status, b.notes || null, id);
-    audit(req.user.id, 'APPOINTMENT_UPDATED', 'appointment', id, b, req.ip);
+    await audit(req.user.id, 'APPOINTMENT_UPDATED', 'appointment', id, b, req.ip);
     res.json({ ok: true });
   } catch (e) {
     if (String(e.message).includes('UNIQUE')) {
@@ -75,19 +155,59 @@ clinicRouter.patch('/appointments/:id', csrfProtect, validate(appointmentSchema)
   }
 }));
 
-clinicRouter.delete('/appointments/:id', csrfProtect, asyncH((req, res) => {
+clinicRouter.delete('/appointments/:id', csrfProtect, asyncH(async (req, res) => {
   const id = Number(req.params.id);
+
+  if (supabase) {
+    const { data, error } = await supabase.from('appointments').update({ deleted_at: new Date().toISOString() }).eq('id', id).is('deleted_at', null).select();
+    if (error || !data || !data.length) throw new AppError(404, 'الموعد غير موجود', 'NOT_FOUND');
+    await audit(req.user.id, 'APPOINTMENT_DELETED', 'appointment', id, null, req.ip);
+    return res.json({ ok: true });
+  }
+
   const r = db.prepare(`UPDATE appointments SET deleted_at = datetime('now') WHERE id = ? AND deleted_at IS NULL`).run(id);
   if (!r.changes) throw new AppError(404, 'الموعد غير موجود', 'NOT_FOUND');
-  audit(req.user.id, 'APPOINTMENT_DELETED', 'appointment', id, null, req.ip);
+  await audit(req.user.id, 'APPOINTMENT_DELETED', 'appointment', id, null, req.ip);
   res.json({ ok: true });
 }));
 
 /* =====================================================================
-   العلاجات والدفعات — معاملات ذرّية
+   العلاجات والدفعات
 ===================================================================== */
-clinicRouter.post('/treatments', csrfProtect, validate(treatmentSchema), asyncH((req, res) => {
+clinicRouter.post('/treatments', csrfProtect, validate(treatmentSchema), asyncH(async (req, res) => {
   const b = req.body;
+
+  if (supabase) {
+    const { data: p } = await supabase.from('patients').select('id').eq('id', b.patientId).is('deleted_at', null).maybeSingle();
+    if (!p) throw new AppError(404, 'المريض غير موجود', 'NOT_FOUND');
+    if (b.initialPayment > b.totalCost) {
+      throw new AppError(400, 'الدفعة الأولى أكبر من السعر الكلي', 'OVERPAY');
+    }
+
+    const { data: created, error: tErr } = await supabase.from('treatments').insert({
+      patient_id: b.patientId,
+      name: b.name,
+      details: b.details || null,
+      total_cost: b.totalCost,
+      paid_amount: b.initialPayment,
+      created_by: req.user.id
+    }).select().single();
+
+    if (tErr) throw new AppError(500, tErr.message, 'DB_ERROR');
+
+    if (b.initialPayment > 0) {
+      await supabase.from('payments').insert({
+        treatment_id: created.id,
+        patient_id: b.patientId,
+        amount: b.initialPayment,
+        received_by: req.user.id
+      });
+    }
+
+    await audit(req.user.id, 'TREATMENT_CREATED', 'treatment', created.id, b, req.ip);
+    return res.status(201).json({ id: created.id });
+  }
+
   const p = db.prepare('SELECT id FROM patients WHERE id = ? AND deleted_at IS NULL').get(b.patientId);
   if (!p) throw new AppError(404, 'المريض غير موجود', 'NOT_FOUND');
   if (b.initialPayment > b.totalCost) {
@@ -109,17 +229,42 @@ clinicRouter.post('/treatments', csrfProtect, validate(treatmentSchema), asyncH(
     return tid;
   });
 
-  audit(req.user.id, 'TREATMENT_CREATED', 'treatment', id, b, req.ip);
+  await audit(req.user.id, 'TREATMENT_CREATED', 'treatment', id, b, req.ip);
   res.status(201).json({ id });
 }));
 
-/**
- * تسجيل دفعة — العملية كلها ذرّية:
- * قراءة الرصيد + التحقق + إدراج الدفعة + تحديث المجموع
- * قيد CHECK في القاعدة يمنع تجاوز المدفوع للكلي حتى تحت التزامن.
- */
-clinicRouter.post('/payments', csrfProtect, validate(paymentSchema), asyncH((req, res) => {
+clinicRouter.post('/payments', csrfProtect, validate(paymentSchema), asyncH(async (req, res) => {
   const { treatmentId, amount, paidAt, method } = req.body;
+
+  if (supabase) {
+    const { data: t } = await supabase.from('treatments')
+      .select('id, patient_id, total_cost, paid_amount')
+      .eq('id', treatmentId)
+      .is('deleted_at', null)
+      .maybeSingle();
+
+    if (!t) throw new AppError(404, 'العلاج غير موجود', 'NOT_FOUND');
+
+    const remaining = t.total_cost - t.paid_amount;
+    if (amount > remaining) {
+      throw new AppError(400, `المبلغ يتجاوز المتبقي (${remaining})`, 'OVERPAY');
+    }
+
+    await supabase.from('payments').insert({
+      treatment_id: treatmentId,
+      patient_id: t.patient_id,
+      amount,
+      paid_at: paidAt || new Date().toISOString().slice(0, 10),
+      method: method || 'نقدي',
+      received_by: req.user.id
+    });
+
+    const newPaid = t.paid_amount + amount;
+    await supabase.from('treatments').update({ paid_amount: newPaid }).eq('id', treatmentId);
+
+    await audit(req.user.id, 'PAYMENT_RECEIVED', 'treatment', treatmentId, { amount }, req.ip);
+    return res.status(201).json({ patientId: t.patient_id, newPaid, total: t.total_cost });
+  }
 
   const result = tx(() => {
     const t = db.prepare(`
@@ -144,14 +289,29 @@ clinicRouter.post('/payments', csrfProtect, validate(paymentSchema), asyncH((req
     return { patientId: t.patient_id, newPaid: t.paid_amount + amount, total: t.total_cost };
   });
 
-  audit(req.user.id, 'PAYMENT_RECEIVED', 'treatment', treatmentId, { amount }, req.ip);
+  await audit(req.user.id, 'PAYMENT_RECEIVED', 'treatment', treatmentId, { amount }, req.ip);
   res.status(201).json(result);
 }));
 
-/** إلغاء دفعة (لا حذف — تدقيق مالي) */
-clinicRouter.post('/payments/:id/void', requireRole('doctor'), csrfProtect, asyncH((req, res) => {
+clinicRouter.post('/payments/:id/void', requireRole('doctor'), csrfProtect, asyncH(async (req, res) => {
   const id = Number(req.params.id);
   const reason = String(req.body?.reason || '').slice(0, 200);
+
+  if (supabase) {
+    const { data: p } = await supabase.from('payments').select('id, treatment_id, amount, voided_at').eq('id', id).maybeSingle();
+    if (!p) throw new AppError(404, 'الدفعة غير موجودة', 'NOT_FOUND');
+    if (p.voided_at) throw new AppError(400, 'الدفعة ملغاة بالفعل', 'ALREADY_VOID');
+
+    await supabase.from('payments').update({ voided_at: new Date().toISOString(), void_reason: reason }).eq('id', id);
+
+    const { data: t } = await supabase.from('treatments').select('paid_amount').eq('id', p.treatment_id).single();
+    if (t) {
+      await supabase.from('treatments').update({ paid_amount: Math.max(0, t.paid_amount - p.amount) }).eq('id', p.treatment_id);
+    }
+
+    await audit(req.user.id, 'PAYMENT_VOIDED', 'payment', id, { reason }, req.ip);
+    return res.json({ ok: true });
+  }
 
   tx(() => {
     const p = db.prepare('SELECT id, treatment_id, amount, voided_at FROM payments WHERE id = ?').get(id);
@@ -161,11 +321,52 @@ clinicRouter.post('/payments/:id/void', requireRole('doctor'), csrfProtect, asyn
     db.prepare('UPDATE treatments SET paid_amount = paid_amount - ? WHERE id = ?').run(p.amount, p.treatment_id);
   });
 
-  audit(req.user.id, 'PAYMENT_VOIDED', 'payment', id, { reason }, req.ip);
+  await audit(req.user.id, 'PAYMENT_VOIDED', 'payment', id, { reason }, req.ip);
   res.json({ ok: true });
 }));
 
-clinicRouter.get('/finance', asyncH((req, res) => {
+clinicRouter.get('/finance', asyncH(async (req, res) => {
+  if (supabase) {
+    const { data: treatRows } = await supabase.from('treatments').select('total_cost, paid_amount').is('deleted_at', null);
+    let total = 0, paid = 0;
+    (treatRows || []).forEach(t => {
+      total += Number(t.total_cost || 0);
+      paid += Number(t.paid_amount || 0);
+    });
+
+    const { data: dueRows } = await supabase.from('v_patient_finance')
+      .select('patient_id, total, paid, due, patients(full_name, file_no)')
+      .gt('due', 0)
+      .order('due', { ascending: false })
+      .limit(200);
+
+    const dueList = (dueRows || []).map(f => ({
+      patientId: f.patient_id,
+      patientName: f.patients?.full_name || '',
+      fileNo: f.patients?.file_no,
+      total: f.total,
+      paid: f.paid,
+      due: f.due
+    }));
+
+    const { data: payRows } = await supabase.from('payments')
+      .select('id, amount, paid_at, method, patients(full_name), treatments(name)')
+      .is('voided_at', null)
+      .order('id', { ascending: false })
+      .limit(50);
+
+    const recentPayments = (payRows || []).map(p => ({
+      id: p.id,
+      amount: p.amount,
+      paidAt: p.paid_at,
+      method: p.method,
+      patientName: p.patients?.full_name || '',
+      treatmentName: p.treatments?.name || ''
+    }));
+
+    return res.json({ totals: { total, paid, due: total - paid }, dueList, recentPayments });
+  }
+
   const totals = db.prepare(`
     SELECT COALESCE(SUM(total_cost),0) AS total,
            COALESCE(SUM(paid_amount),0) AS paid,
@@ -195,9 +396,28 @@ clinicRouter.get('/finance', asyncH((req, res) => {
 }));
 
 /* =====================================================================
-   المختبر (الطبيب فقط)
+   المختبر
 ===================================================================== */
-clinicRouter.get('/labs', requireRole('doctor'), asyncH((req, res) => {
+clinicRouter.get('/labs', requireRole('doctor'), asyncH(async (req, res) => {
+  if (supabase) {
+    const { data: rows } = await supabase.from('lab_works')
+      .select('id, patient_id, work_details, lab_name, cost, status, due_date, patients(full_name)')
+      .is('deleted_at', null)
+      .order('due_date');
+
+    const formatted = (rows || []).map(l => ({
+      id: l.id,
+      patientId: l.patient_id,
+      workDetails: l.work_details,
+      labName: l.lab_name,
+      cost: l.cost,
+      status: l.status,
+      dueDate: l.due_date,
+      patientName: l.patients?.full_name || ''
+    }));
+    return res.json({ labs: formatted });
+  }
+
   const rows = db.prepare(`
     SELECT l.id, l.patient_id AS patientId, l.work_details AS workDetails,
            l.lab_name AS labName, l.cost, l.status, l.due_date AS dueDate,
@@ -209,45 +429,157 @@ clinicRouter.get('/labs', requireRole('doctor'), asyncH((req, res) => {
   res.json({ labs: rows });
 }));
 
-clinicRouter.post('/labs', requireRole('doctor'), csrfProtect, validate(labSchema), asyncH((req, res) => {
+clinicRouter.post('/labs', requireRole('doctor'), csrfProtect, validate(labSchema), asyncH(async (req, res) => {
   const b = req.body;
+
+  if (supabase) {
+    const { data: p } = await supabase.from('patients').select('id').eq('id', b.patientId).is('deleted_at', null).maybeSingle();
+    if (!p) throw new AppError(404, 'المريض غير موجود', 'NOT_FOUND');
+
+    const { data: created, error } = await supabase.from('lab_works').insert({
+      patient_id: b.patientId,
+      work_details: b.workDetails,
+      lab_name: b.labName || null,
+      cost: b.cost,
+      status: b.status,
+      due_date: b.dueDate || null,
+      created_by: req.user.id
+    }).select().single();
+
+    if (error) throw new AppError(500, error.message, 'DB_ERROR');
+
+    await audit(req.user.id, 'LAB_CREATED', 'lab', created.id, b, req.ip);
+    return res.status(201).json({ id: created.id });
+  }
+
   const p = db.prepare('SELECT id FROM patients WHERE id = ? AND deleted_at IS NULL').get(b.patientId);
   if (!p) throw new AppError(404, 'المريض غير موجود', 'NOT_FOUND');
   const info = db.prepare(`
     INSERT INTO lab_works (patient_id, work_details, lab_name, cost, status, due_date, created_by)
     VALUES (?,?,?,?,?,?,?)
   `).run(b.patientId, b.workDetails, b.labName || null, b.cost, b.status, b.dueDate || null, req.user.id);
-  audit(req.user.id, 'LAB_CREATED', 'lab', info.lastInsertRowid, b, req.ip);
+  await audit(req.user.id, 'LAB_CREATED', 'lab', info.lastInsertRowid, b, req.ip);
   res.status(201).json({ id: Number(info.lastInsertRowid) });
 }));
 
-clinicRouter.patch('/labs/:id', requireRole('doctor'), csrfProtect, validate(labSchema), asyncH((req, res) => {
+clinicRouter.patch('/labs/:id', requireRole('doctor'), csrfProtect, validate(labSchema), asyncH(async (req, res) => {
   const id = Number(req.params.id);
   const b = req.body;
+
+  if (supabase) {
+    const { data, error } = await supabase.from('lab_works').update({
+      patient_id: b.patientId,
+      work_details: b.workDetails,
+      lab_name: b.labName || null,
+      cost: b.cost,
+      status: b.status,
+      due_date: b.dueDate || null,
+      updated_at: new Date().toISOString()
+    }).eq('id', id).is('deleted_at', null).select();
+
+    if (error || !data || !data.length) throw new AppError(404, 'عمل المختبر غير موجود', 'NOT_FOUND');
+    await audit(req.user.id, 'LAB_UPDATED', 'lab', id, b, req.ip);
+    return res.json({ ok: true });
+  }
+
   const r = db.prepare(`
     UPDATE lab_works SET patient_id=?, work_details=?, lab_name=?, cost=?, status=?, due_date=?,
       updated_at=datetime('now')
     WHERE id = ? AND deleted_at IS NULL
   `).run(b.patientId, b.workDetails, b.labName || null, b.cost, b.status, b.dueDate || null, id);
   if (!r.changes) throw new AppError(404, 'عمل المختبر غير موجود', 'NOT_FOUND');
-  audit(req.user.id, 'LAB_UPDATED', 'lab', id, b, req.ip);
+  await audit(req.user.id, 'LAB_UPDATED', 'lab', id, b, req.ip);
   res.json({ ok: true });
 }));
 
-clinicRouter.delete('/labs/:id', requireRole('doctor'), csrfProtect, asyncH((req, res) => {
+clinicRouter.delete('/labs/:id', requireRole('doctor'), csrfProtect, asyncH(async (req, res) => {
   const id = Number(req.params.id);
+
+  if (supabase) {
+    const { data, error } = await supabase.from('lab_works').update({ deleted_at: new Date().toISOString() }).eq('id', id).is('deleted_at', null).select();
+    if (error || !data || !data.length) throw new AppError(404, 'عمل المختبر غير موجود', 'NOT_FOUND');
+    await audit(req.user.id, 'LAB_DELETED', 'lab', id, null, req.ip);
+    return res.json({ ok: true });
+  }
+
   const r = db.prepare(`UPDATE lab_works SET deleted_at=datetime('now') WHERE id=? AND deleted_at IS NULL`).run(id);
   if (!r.changes) throw new AppError(404, 'عمل المختبر غير موجود', 'NOT_FOUND');
-  audit(req.user.id, 'LAB_DELETED', 'lab', id, null, req.ip);
+  await audit(req.user.id, 'LAB_DELETED', 'lab', id, null, req.ip);
   res.json({ ok: true });
 }));
 
 /* =====================================================================
-   لوحة التحكم + التنبيهات (استعلام واحد مجمّع — سريع مع آلاف السجلات)
+   لوحة التحكم
 ===================================================================== */
-clinicRouter.get('/dashboard', asyncH((req, res) => {
+clinicRouter.get('/dashboard', asyncH(async (req, res) => {
   const today = new Date().toISOString().slice(0, 10);
   const tomorrow = new Date(Date.now() + 864e5).toISOString().slice(0, 10);
+
+  if (supabase) {
+    const { count: patientCount } = await supabase.from('patients').select('*', { count: 'exact', head: true }).is('deleted_at', null);
+
+    const { data: treatRows } = await supabase.from('treatments').select('total_cost, paid_amount').is('deleted_at', null);
+    let total = 0, paid = 0;
+    (treatRows || []).forEach(t => {
+      total += Number(t.total_cost || 0);
+      paid += Number(t.paid_amount || 0);
+    });
+
+    const { data: todayApts } = await supabase.from('appointments')
+      .select('id, patient_id, appointment_time, duration_min, treatment_type, status, patients(full_name)')
+      .eq('appointment_date', today)
+      .is('deleted_at', null)
+      .order('appointment_time');
+
+    const todayAppointments = (todayApts || []).map(a => ({
+      id: a.id, patientId: a.patient_id, appointmentTime: a.appointment_time,
+      durationMin: a.duration_min, treatmentType: a.treatment_type, status: a.status,
+      patientName: a.patients?.full_name || ''
+    }));
+
+    const { data: tmwApts } = await supabase.from('appointments')
+      .select('id, patient_id, appointment_time, treatment_type, patients(full_name)')
+      .eq('appointment_date', tomorrow)
+      .is('deleted_at', null)
+      .order('appointment_time');
+
+    const tomorrowAppointments = (tmwApts || []).map(a => ({
+      id: a.id, patientId: a.patient_id, appointmentTime: a.appointment_time,
+      treatmentType: a.treatment_type, patientName: a.patients?.full_name || ''
+    }));
+
+    const { data: dueRows } = await supabase.from('v_patient_finance')
+      .select('patient_id, due, patients(full_name)')
+      .gt('due', 0)
+      .order('due', { ascending: false })
+      .limit(20);
+
+    const dueInstallments = (dueRows || []).map(f => ({
+      patientId: f.patient_id, patientName: f.patients?.full_name || '', due: f.due
+    }));
+
+    const { data: recentPats } = await supabase.from('patients')
+      .select('id, file_no, full_name, age, gender, phone, created_at')
+      .is('deleted_at', null)
+      .order('id', { ascending: false })
+      .limit(5);
+
+    const recentPatients = (recentPats || []).map(p => ({
+      id: p.id, fileNo: p.file_no, fullName: p.full_name, age: p.age,
+      gender: p.gender, phone: p.phone, createdAt: p.created_at
+    }));
+
+    const { count: overdueLabs } = await supabase.from('lab_works')
+      .select('*', { count: 'exact', head: true })
+      .is('deleted_at', null)
+      .neq('status', 'تم الاستلام')
+      .lt('due_date', today);
+
+    return res.json({
+      stats: { patientCount: patientCount || 0, todayCount: todayAppointments.length, total, paid, due: total - paid, overdueLabs: overdueLabs || 0 },
+      todayAppointments, tomorrowAppointments, dueInstallments, followUps: [], recentPatients,
+    });
+  }
 
   const patientCount = db.prepare('SELECT COUNT(*) c FROM patients WHERE deleted_at IS NULL').get().c;
   const totals = db.prepare(`
